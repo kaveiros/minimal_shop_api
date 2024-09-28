@@ -1,8 +1,41 @@
+using Microsoft.AspNetCore.Authentication.JwtBearer;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.IdentityModel.Tokens;
+using System.IdentityModel.Tokens.Jwt;
+using System.Security.Claims;
+using System.Text;
 
 
 
 var builder = WebApplication.CreateBuilder(args);
+
+// Add JWT Authentication
+builder.Services.AddAuthentication(options =>
+{
+    options.DefaultAuthenticateScheme = JwtBearerDefaults.AuthenticationScheme;
+    options.DefaultChallengeScheme = JwtBearerDefaults.AuthenticationScheme;
+})
+.AddJwtBearer(options =>
+{
+    var jwtSettings = builder.Configuration.GetSection("Jwt");
+    options.TokenValidationParameters = new TokenValidationParameters
+    {
+        ValidateIssuer = true,
+        ValidateAudience = true,
+        ValidateLifetime = true,
+        ValidateIssuerSigningKey = true,
+        ValidIssuer = jwtSettings["Issuer"],
+        ValidAudience = jwtSettings["Audience"],
+        IssuerSigningKey = new SymmetricSecurityKey(System.Text.Encoding.UTF8.GetBytes(jwtSettings["Key"]??String.Empty))
+    };
+});
+
+// Add authorization
+builder.Services.AddAuthorizationBuilder()
+                        // Add authorization
+                        .AddPolicy("AdminPolicy", policy => policy.RequireRole("admin"));
+
+
 builder.Services.AddDbContext<ShopDb>(opt => opt.UseInMemoryDatabase("shopDb"));
 builder.Services.AddDatabaseDeveloperPageExceptionFilter();
 var app = builder.Build();
@@ -23,22 +56,43 @@ app.MapGet("/", () => "Welcome to shop api!");
 
 app.MapPost("/login", async (HttpContext context, ShopDb db) =>
 {
-
     var loginRequest = await context.Request.ReadFromJsonAsync<LoginRequest>();
     if (loginRequest != null)
     {
-        var email = loginRequest.Email;
-        string pass = loginRequest.Passwd;
-        var foundUser = await db.Users.Where(u => u.Email == email).FirstOrDefaultAsync<User>();
-        var obj = "{email:" + email + "password: " + pass + "}";
-        //TO DO RETURN JSON WEB TOKEN
-        return Results.Ok(foundUser);
+        var foundUser = await db.Users
+            .Where(u => u.Email == loginRequest.Email && u.Passwd == loginRequest.Passwd)
+            .FirstOrDefaultAsync<User>();
+
+        if (foundUser != null)
+        {
+            // Create JWT token
+            var jwtSettings = context.RequestServices.GetRequiredService<IConfiguration>().GetSection("Jwt");
+            var key = Encoding.UTF8.GetBytes(jwtSettings["Key"]?? String.Empty);
+            var tokenHandler = new JwtSecurityTokenHandler();
+            var tokenDescriptor = new SecurityTokenDescriptor
+            {
+                Subject = new ClaimsIdentity(new[]
+                {
+                    new Claim(ClaimTypes.Email, foundUser.Email),
+                    new Claim(ClaimTypes.Role, foundUser.Role),
+                    new Claim(ClaimTypes.PrimarySid, foundUser.Id.ToString())
+                }),
+                Expires = DateTime.UtcNow.AddMinutes(double.Parse(jwtSettings["ExpireMinutes"]?? "5")),
+                SigningCredentials = new SigningCredentials(new SymmetricSecurityKey(key), SecurityAlgorithms.HmacSha256Signature),
+                Issuer = jwtSettings["Issuer"],
+                Audience = jwtSettings["Audience"]
+            };
+
+            var token = tokenHandler.CreateToken(tokenDescriptor);
+            var jwtToken = tokenHandler.WriteToken(token);
+
+            return Results.Ok(new { Token = jwtToken });
+        }
     }
-    else
-    {
-        return Results.NotFound("User not found");
-    }
+
+    return Results.NotFound("Invalid email or password");
 });
+
 
 app.MapPost("/create-user", async (HttpContext context, ShopDb db) =>
 {
