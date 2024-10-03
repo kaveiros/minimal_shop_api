@@ -9,4 +9,6 @@ public class User {
 
     public string Role{get; set;} = "customer";
 
+    public bool IsActive{get; set;}
+
 }
